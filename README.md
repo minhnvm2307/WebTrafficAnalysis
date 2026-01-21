@@ -10,10 +10,15 @@ pip install -r requirements.txt
 
 ## Dataset
 
-> Download from https://drive.google.com/drive/folders/1tAEIObd25p8JeqFVLS2ef70uIuHLykxX
-> Then and to \dataset folder
+> Download raw data from https://drive.google.com/drive/folders/1tAEIObd25p8JeqFVLS2ef70uIuHLykxX
 
-**Data rows:** 2934961
+```
+# 1. Add 'train.txt' and 'test.txt' to /dataset folder
+# 2. Run parsing raw data
+python main.py
+```
+
+**Train rows:** 2.934.961
 
 **Sample:**
 

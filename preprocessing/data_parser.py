@@ -18,7 +18,7 @@ def load_raw_data(file_path):
         lines = f.readlines()
     return lines
 
-def preprocess_data(lines):
+def preprocess_data(lines, verbose=False):
     """Preprocess the raw data and return the processed DataFrame."""
     # Regex pattern to parse Apache/NASA log format
     log_pattern = r'^(\S+) - - \[([^\]]+)\] "(.*)" (\d+) (\S+)'
@@ -75,7 +75,8 @@ def preprocess_data(lines):
         else:
             skipped_lines.append(line)
     
-    print(f"Parsed {len(parsed_data)} lines")
+    if verbose:
+        print(f"Parsed {len(parsed_data)} lines, skipped {len(skipped_lines)} lines.")
     
     df = pd.DataFrame(parsed_data)
     return df, skipped_lines

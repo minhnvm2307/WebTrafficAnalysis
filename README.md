@@ -29,3 +29,20 @@ python main.py
 | 199.120.110.21 | 01/Jul/1995:00:00:09 -0400 | GET | /shuttle/missions/sts-73/mission-sts-73.html | HTTP/1.0 | 200 | 4085 |
 | burger.letters.com | 01/Jul/1995:00:00:11 -0400 | GET | /shuttle/countdown/liftoff.html | HTTP/1.0 | 304 | 0 |
 | 199.120.110.21 | 01/Jul/1995:00:00:11 -0400 | GET | /shuttle/missions/sts-73/sts-73-patch-small.gif | HTTP/1.0 | 200 | 4179 |
+
+## Run app
+
+### Server: local hosting
+
+```
+unicorn traffic_monitor/server/ml_server:app --reload --port 8000
+```
+
+### Dashboard (streamlit)
+
+```
+streamlit run traffic_monitor/app.py 
+```
+
+### Configuration
+`traffic_monitor/views/settings.py`

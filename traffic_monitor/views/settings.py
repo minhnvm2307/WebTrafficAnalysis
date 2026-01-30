@@ -14,7 +14,7 @@ SPEED_OPTIONS = {
 
 # Display settings
 MAX_LOGS_DISPLAY = 5000  
-MAX_LOGS_DASHBOARD = 500
+MAX_LOGS_DASHBOARD = 50
 BATCH_SIZE = 30  
 REFRESH_INTERVAL = 2.3  
 
@@ -33,12 +33,12 @@ BASE_MEMORY = 512
 
 # Terminal style settings
 TERMINAL_BG_COLOR = "#0C0C0C"
-TERMINAL_TEXT_COLOR = "#557955"
+TERMINAL_TEXT_COLOR = "#568F56"
 TERMINAL_MAX_LINES = 50
 
 # Status code colors
 STATUS_COLORS = {
-    "2xx": "#00fa3a",  
+    "2xx": "#2ce056",  
     "3xx": "#17a2b8",  
     "4xx": "#ff8b07",  
     "5xx": "#dc3545",  

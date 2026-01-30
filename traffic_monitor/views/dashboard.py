@@ -70,8 +70,8 @@ class MainDashboard:
             error_rate = 0
         
         # Simulate system metrics
-        cpu_usage = self._calculate_cpu_usage(len(recent_df), 60)
-        memory_usage = self._calculate_memory_usage(total_requests)
+        cpu_usage = calculate_cpu_usage(self.logs_buffer, len(recent_df), 60)
+        memory_usage = calculate_memory_usage(self.logs_buffer, total_requests)
         
         # Display metrics in columns
         st.subheader("Current State (Last 60 seconds)")
@@ -526,7 +526,7 @@ class MainDashboard:
     
     def render(self):
         """Render the complete main dashboard"""
-        st.header("📊 Main Dashboard - Real-time Analytics")
+        st.header("📊 Real-time Analytics")
         
         # Current metrics at top
         self.render_current_metrics()
@@ -537,19 +537,11 @@ class MainDashboard:
         col1, col2 = st.columns(2)
         
         with col1:
-            st.subheader("📈 Request Rate")
             self.render_requests_per_second_chart()
-            
             st.divider()
-            
-            st.subheader("📊 Error Distribution")
             self.render_error_requests_chart()
         
         with col2:
-            st.subheader("💾 Data Transfer")
             self.render_bytes_chart()
-            
             st.divider()
-            
-            st.subheader("🖥️ System Resources")
             self.render_system_metrics_chart()

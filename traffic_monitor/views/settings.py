@@ -45,4 +45,4 @@ STATUS_COLORS = {
 }
 
 # Log file path (default)
-DEFAULT_LOG_FILE = "dataset/test.txt"
+DEFAULT_LOG_FILE = "https://github.com/minhnvm2307/WebTrafficAnalysis/releases/download/v1.0/test.txt"

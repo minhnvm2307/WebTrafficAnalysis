@@ -1,7 +1,6 @@
 import pandas as pd
-import csv
 import re
-from datetime import datetime
+import urllib.request
 
 '''
 Raw data format
@@ -16,6 +15,13 @@ def load_raw_data(file_path):
     """Load raw data from the specified TXT file."""
     with open(file_path, 'r', encoding='utf-8', errors='ignore') as f:
         lines = f.readlines()
+    return lines
+
+def load_raw_data_online(url=None):
+    """Load raw data from the specified URL."""    
+    with urllib.request.urlopen(url) as response:
+        lines = response.read().decode('utf-8', errors='ignore').splitlines(keepends=True)
+    
     return lines
 
 def preprocess_data(lines, verbose=False):

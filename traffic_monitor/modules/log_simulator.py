@@ -6,7 +6,7 @@ import pandas as pd
 from datetime import datetime
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
-from preprocessing.data_parser import load_raw_data, preprocess_data
+from preprocessing.data_parser import load_raw_data, preprocess_data, load_raw_data_online
 
 class LogDataLoader:
     def __init__(self, file_path, speed_multiplier=1.0, shuffle=False, loop=False):
@@ -23,7 +23,7 @@ class LogDataLoader:
         self.loop = loop
         
         # Load raw lines
-        self.lines = load_raw_data(file_path)
+        self.lines = load_raw_data_online(file_path)
         self.total_lines = len(self.lines)
         self.current_index = 0
         

@@ -2,3 +2,6 @@
 .venv
 *\__pycache__
 dataset/*
+model
+main.py
+check*

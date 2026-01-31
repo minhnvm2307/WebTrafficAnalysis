@@ -9,3 +9,6 @@ streamlit
 plotly
 requests
 statsmodels
+torch
+tensorflow
+matplotlib

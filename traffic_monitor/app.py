@@ -14,6 +14,7 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(
 # Import components
 from views.tracer import LogTracer
 from views.dashboard import MainDashboard
+from views.forecast_scale import ForecastScaleDashboard
 import views.settings as settings
 from modules.log_simulator import LogDataLoader
 
@@ -67,6 +68,9 @@ def init_session_state():
     if 'dashboard' not in st.session_state:
         st.session_state.dashboard = MainDashboard()
     
+    if 'forecast_dashboard' not in st.session_state:
+        st.session_state.forecast_dashboard = ForecastScaleDashboard()
+    
     if 'loader' not in st.session_state:
         st.session_state.loader = None
     
@@ -102,6 +106,7 @@ def stream_next_log():
             for log in batch:
                 st.session_state.tracer.add_log(log)
                 st.session_state.dashboard.add_log(log)
+                st.session_state.forecast_dashboard.add_log(log)
                 st.session_state.total_logs_processed += 1
             return True
         else:
@@ -125,7 +130,7 @@ def sidebar_controls():
     col1, col2 = st.sidebar.columns(2)
     
     with col1:
-        if st.button("▶️ Start", use_container_width=True, disabled=st.session_state.simulator_running):
+        if st.button("▶️ Start", width='stretch', disabled=st.session_state.simulator_running):
             # Create loader
             st.session_state.loader = LogDataLoader(
                 st.session_state.log_file_path,
@@ -138,15 +143,16 @@ def sidebar_controls():
             st.rerun()
     
     with col2:
-        if st.button("⏸️ Stop", use_container_width=True, disabled=not st.session_state.simulator_running):
+        if st.button("⏸️ Stop", width='stretch', disabled=not st.session_state.simulator_running):
             st.session_state.simulator_running = False
             st.session_state.loader = None
             st.rerun()
     
     # Clear logs button
-    if st.sidebar.button("🗑️ Clear Logs", use_container_width=True):
+    if st.sidebar.button("🗑️ Clear Logs", width='stretch'):
         st.session_state.tracer.clear_logs()
         st.session_state.dashboard.clear_logs()
+        st.session_state.forecast_dashboard.clear_logs()
         st.session_state.total_logs_processed = 0
         st.rerun()
     
@@ -247,9 +253,9 @@ def main():
     
     # Header
     st.markdown('<div class="main-header">📊 Log Monitor Dashboard</div>', unsafe_allow_html=True)
-    
+
     # Navigation tabs
-    tab1, tab2 = st.tabs(["📋 Raw Log View", "📊 Main Dashboard"])
+    tab1, tab2, tab3 = st.tabs(["📋 Raw Log View", "📊 Main Dashboard", "🔮 Forecast & Scaling"])
     
     with tab1:
         # Raw Log View - Sub-tabs for different views
@@ -273,6 +279,9 @@ def main():
     with tab2:
         # Main Dashboard - Placeholder for future analytics
         st.session_state.dashboard.render()
+    with tab3:
+        # Forecast & Auto-scaling Dashboard
+        st.session_state.forecast_dashboard.render(st.session_state.tracer.logs_buffer)
     
     # Auto-refresh when simulator is running
     if st.session_state.simulator_running:

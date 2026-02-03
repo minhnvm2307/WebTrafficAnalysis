@@ -1,11 +1,15 @@
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from typing import List
+from typing import List, Optional
 import numpy as np
 import pandas as pd
-from statsmodels.tsa.holtwinters import ExponentialSmoothing
+from datetime import datetime, timedelta
+from pathlib import Path
 
-app = FastAPI()
+from traffic_monitor.server.utils import Predictor, detect_anomaly
+from model.params import get_params
+
+app = FastAPI(title="Traffic Analysis ML Server", version="1.0.0")
 
 # --- DATA MODELS ---
 class MetricPoint(BaseModel):
@@ -16,93 +20,139 @@ class MetricPoint(BaseModel):
 class MetricBatch(BaseModel):
     history: List[MetricPoint]
 
+class ForecastResponse(BaseModel):
+    forecast: List[float]
+    confidence_interval: Optional[dict] = None
+    timestamp_range: Optional[List[str]] = None
+
+class ScalingRecommendation(BaseModel):
+    action: str  # SCALE_OUT, SCALE_IN, MAINTAIN, WARNING, COOLDOWN
+    reason: str
+    suggested_instances: int
+    predicted_load_avg: float
+    current_load: int
+    is_anomaly: bool
+    anomaly_details: dict
+    estimated_hourly_cost: float
+    cooldown_remaining: float
+    confidence: float
+
 # --- CONFIG ---
-UNIT_COST_PER_INSTANCE = 0.05  # $ per hour
-MAX_CAPACITY_PER_INSTANCE = 1000 # requests per minute
-SCALE_COOLDOWN = 5 # minutes (Hysteresis)
-last_scale_action_time = pd.Timestamp.now() - pd.Timedelta(minutes=10)
+UNIT_COST_PER_INSTANCE = 0.05  # $ per hour per instance
+UNIT_COST_PER_REQUEST = 0.0001  # $ per request
+UNIT_COST_PER_GB = 0.10  # $ per GB transferred
+MAX_CAPACITY_PER_INSTANCE = 1000  # requests per minute
+SCALE_COOLDOWN = 5  # minutes (Hysteresis)
+HISTORY_WINDOW = 60  # minutes
+FORECAST_HORIZON = 10  # minutes ahead to forecast
+ANOMALY_THRESHOLD_SIGMA = 3.0  # Z-score threshold
+SCALE_UP_THRESHOLD = 0.75  # Scale up at 75% capacity
+SCALE_DOWN_THRESHOLD = 0.30  # Scale down below 30% capacity
 
-# --- LOGIC ---
 
-@app.post("/forecast")
-def get_forecast(data: MetricBatch):
-    """
-    Dự báo traffic trong 5 phút tới sử dụng Exponential Smoothing (phù hợp time-series ngắn hạn)
-    """
-    if len(data.history) < 10:
-        return {"forecast": []}
-    
-    df = pd.DataFrame([vars(p) for p in data.history])
-    df['request_count'] = pd.to_numeric(df['request_count'])
-    
-    # Simple Exponential Smoothing (Holt-Winters)
-    try:
-        model = ExponentialSmoothing(df['request_count'], trend='add', seasonal=None).fit()
-        forecast_values = model.forecast(5).tolist() # Dự báo 5 bước tiếp theo
-    except:
-        # Fallback nếu data quá nhiễu hoặc ít
-        forecast_values = [df['request_count'].mean()] * 5
-        
-    return {"forecast": forecast_values}
+# Global state
+last_scale_action_time = datetime.now() - timedelta(minutes=10)
+current_instances = 1  # Start with 1 instance
+predictor = Predictor(model_type="baseline")
+config = get_params("baseline")
 
-@app.post("/recommend-scaling")
-def recommend_scaling(data: MetricBatch):
-    """
-    Quyết định Scaling dựa trên Forecast và Hysteresis (Cooldown)
-    """
-    global last_scale_action_time
-    
-    # 1. Lấy Forecast
-    forecast_resp = get_forecast(data)
-    predicted_load = np.mean(forecast_resp['forecast']) if forecast_resp['forecast'] else 0
-    
-    current_time = pd.Timestamp.now()
-    
-    # 2. Tính toán số instance cần thiết
-    required_instances = max(1, int(np.ceil(predicted_load / MAX_CAPACITY_PER_INSTANCE)))
-    
-    # 3. Anomaly Detection (DDoS/Spike) - Z-Score
-    df = pd.DataFrame([vars(p) for p in data.history])
-    recent_load = df['request_count'].iloc[-1]
-    mean_load = df['request_count'].mean()
-    std_load = df['request_count'].std()
-    
-    is_anomaly = False
-    if std_load > 0:
-        z_score = (recent_load - mean_load) / std_load
-        if z_score > 3: # Ngưỡng 3 sigma
-            is_anomaly = True
+# Load padding data from cached CSV
+cache_path = Path('cache/padding_train_15min.csv')
+if cache_path.exists():
+    padding_df_resampled = pd.read_csv(cache_path)
+    padding_df_resampled['timestamp'] = pd.to_datetime(padding_df_resampled['timestamp'])
+    print(f"✅ Loaded {len(padding_df_resampled)} 15-minute intervals from cache")
+else:
+    print(f"⚠️ Cache file not found: {cache_path}. Run cache generation script.")
+    padding_df_resampled = pd.DataFrame({'timestamp': [], 'request_count': [], 'bytes': []})
 
-    # 4. Logic Hysteresis
-    action = "MAINTAIN"
-    reason = "Load stable"
-    
-    time_since_last_scale = (current_time - last_scale_action_time).total_seconds() / 60
-    
-    if is_anomaly:
-        action = "WARNING"
-        reason = f"DDoS/Spike Detected! (Z-Score: {z_score:.2f}). Auto-scaling paused to prevent cost explosion."
-    elif time_since_last_scale < SCALE_COOLDOWN:
-        action = "COOLDOWN"
-        reason = f"In hysteresis period. Wait {SCALE_COOLDOWN - time_since_last_scale:.1f} min."
-    else:
-        # Giả lập current capacity (trong thực tế sẽ lấy từ Cloud provider)
-        # Ở đây ta giả định hệ thống đang chạy optimal - 1 hoặc + 1
-        if predicted_load > (required_instances - 1) * MAX_CAPACITY_PER_INSTANCE * 0.8: # Threshold 80%
-             action = "SCALE_OUT"
-             reason = f"Forecast {predicted_load:.0f} reqs exceeds capacity."
-             last_scale_action_time = current_time
 
-    # 5. Cost Estimation
-    estimated_cost = required_instances * UNIT_COST_PER_INSTANCE
-    
+
+
+# --- ENDPOINTS ---
+
+@app.get("/")
+def root():
+    """Health check endpoint"""
     return {
-        "action": action,
-        "reason": reason,
-        "suggested_instances": required_instances,
-        "predicted_load_avg": predicted_load,
-        "is_anomaly": is_anomaly,
-        "estimated_hourly_cost": estimated_cost
+        "status": "running",
+        "service": "Traffic Analysis ML Server",
+        "version": "1.0.0",
+        "endpoints": ["/forecast", "/recommend-scaling", "/anomaly-detect", "/cost-estimate"]
     }
 
-# Run server independently: uvicorn ml_server:app --reload --port 8000
+@app.post("/forecast", response_model=ForecastResponse)
+def get_forecast(data: MetricBatch):
+    """
+    Traffic forecast using trained Seq2Seq model
+    
+    Returns predictions for the next FORECAST_HORIZON minutes based on
+    the historical data provided in the request.
+    """
+    if len(data.history) < 900:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient history. Need at least 900 data points"
+        )
+    
+    # Convert to DataFrame
+    df = pd.DataFrame([p.model_dump() for p in data.history])
+    df['timestamp'] = pd.to_datetime(df['timestamp'])
+    df = df.sort_values('timestamp')
+    time_span_minutes = (df['timestamp'].iloc[-1] - df['timestamp'].iloc[0]).total_seconds() / 60
+    
+    if time_span_minutes < 15:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Insufficient time span. Need at least 15 minutes of data"
+        )
+    
+    # Resample to 15-minute intervals (model expects 15-min aggregated data)
+    df_resampled = df.set_index('timestamp').resample('15min').agg({
+        'request_count': 'sum', 
+        'bytes': 'sum'
+    }).reset_index()
+    
+    if len(df_resampled) < config.train_window:
+        # Take last N intervals from padding data to fill the gap
+        needed = config.train_window - len(df_resampled)
+        padding_slice = padding_df_resampled.tail(needed).copy()
+        
+        # Shift padding timestamps to align before current data
+        time_shift = df_resampled['timestamp'].iloc[0] - padding_slice['timestamp'].iloc[-1] - timedelta(minutes=15)
+        padding_slice['timestamp'] = padding_slice['timestamp'] + time_shift
+        
+        # Combine padding + current data
+        df_resampled = pd.concat([padding_slice, df_resampled]).reset_index(drop=True)
+    
+    try:
+        # Use trained model for inference (expects 15-min aggregated data)
+        forecast_values = predictor.predict(df_resampled['request_count'].values, predict_horizon=FORECAST_HORIZON)
+        
+        # Generate future timestamps (15-min intervals)
+        last_timestamp = df_resampled['timestamp'].iloc[-1]
+        future_timestamps = [
+            (last_timestamp + timedelta(minutes=15*(i+1))).isoformat()
+            for i in range(FORECAST_HORIZON)
+        ]
+        
+        # Calculate confidence interval (simple approach using recent std)
+        recent_std = df_resampled['request_count'].tail(30).std()
+        confidence_interval = {
+            'lower': (forecast_values - 1.96 * recent_std).clip(min=0).tolist(),
+            'upper': (forecast_values + 1.96 * recent_std).tolist()
+        }
+        
+        return ForecastResponse(
+            forecast=forecast_values.tolist(),
+            confidence_interval=confidence_interval,
+            timestamp_range=future_timestamps
+        )
+        
+    except Exception as e:
+        # Fallback to moving average
+        print(f"⚠️ Model inference failed: {e}.")
+        return None
+
+
+# Run server: uvicorn traffic_monitor.server.ml_server:app --reload --port 8000

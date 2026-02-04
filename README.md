@@ -236,3 +236,65 @@ MAX_LOGS_DISPLAY = 5000     # Buffer size
 MIT License - Free to use and modify
 
 ---
+
+## 9. Cấu trúc Project
+
+```
+WebTrafficAnalysis/
+│
+├── 📊 notebooks/                      # ⭐ Jupyter Notebooks - Phân tích & Thử nghiệm
+│   ├── Data_Analysis.ipynb           # EDA: Khám phá dữ liệu, visualizations, insights
+│   ├── SARIMA.ipynb                  # Thử nghiệm mô hình SARIMA (statistical approach)
+│   ├── Prophet.ipynb                 # Thử nghiệm Facebook Prophet
+│   ├── LSTM.ipynb                    # Baseline: LSTM model training & evaluation
+│   └── Seq2Seq.ipynb                 # ⭐ Advanced: Seq2Seq + Attention (best model)
+│
+├── 🧠 model/                          # Core ML Components
+│   ├── model.py                      # Định nghĩa kiến trúc Seq2Seq + Attention
+│   ├── input_pipe.py                 # Data pipeline: load, transform, batch generation
+│   ├── params.py                     # Hyperparameters và config
+│   └── checkpoints/
+│       └── seq2seq_15p.pth          # Trained model weights (best checkpoint)
+│
+├── 🔧 preprocessing/                  # Data Processing
+│   └── data_parser.py                # Parse raw logs → time series (15min aggregation)
+│
+├── 🚀 traffic_monitor/                # Production Dashboard & API
+│   ├── app.py                        # 🎯 Main entry point - Streamlit app
+│   │
+│   ├── server/                       # Backend API Service
+│   │   ├── ml_server.py             # FastAPI: /forecast, /anomaly-detect, /recommend-scaling
+│   │   ├── utils.py                 # Helper functions cho server
+│   │   └── test.py                  # API testing scripts
+│   │
+│   ├── views/                        # Frontend UI Components
+│   │   ├── dashboard.py             # Main dashboard view (metrics, charts)
+│   │   ├── forecast_scale.py        # ⭐ Forecast & Auto-Scaling view (core feature)
+│   │   ├── tracer.py                # Raw log viewer (terminal-style)
+│   │   └── settings.py              # Config: refresh rate, batch size, thresholds
+│   │
+│   └── modules/                      # Supporting Modules
+│       ├── log_simulator.py         # Simulate real-time log streaming
+│       ├── predict_simulator.py     # Live prediction engine
+│       ├── styles.py                # CSS styling cho dashboard
+│       └── utils.py                 # Shared utilities
+│
+├── 📁 dataset/                        # Raw Data
+│   ├── train.txt / train.csv         # Training logs (Aug-Sep 1995)
+│   └── test.txt / test.csv           # Testing logs
+│
+├── 💾 cache/                          # Processed Data
+│   └── simulated_data.csv            # Preprocessed time series (features + target)
+│
+├── 📸 images/                         # Documentation Assets
+│   ├── main_view.png                 # Dashboard screenshot
+│   └── predict_view.png              # Forecast view screenshot
+│
+├── ⚙️ Configuration Files
+│   ├── pyproject.toml                # Project metadata (Poetry/PEP)
+│   ├── requirements.txt              # Python dependencies
+│   └── run.sh                        # Quick start script
+│
+└── 📖 README.md                       # Documentation (file này)
+```
+---

@@ -170,9 +170,12 @@ streamlit run traffic_monitor/app.py
 - Cost estimation (hourly, daily, monthly)
 
 ### Demo UI
-[!images/main_view.png]
 
-[!images/predict_view.png]
+**Main Dashboard**
+![Main Dashboard](images/main_view.png)
+
+**Forecast & Auto-Scaling View**
+![Forecast View](images/predict_view.png)
 
 ### Configuration
 Chỉnh sửa `traffic_monitor/views/settings.py`:

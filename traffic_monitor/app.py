@@ -7,8 +7,6 @@ import sys
 import os
 import time
 from pathlib import Path
-
-# Add parent directory to path for imports
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 # Import components
@@ -17,6 +15,7 @@ from views.dashboard import MainDashboard
 from views.forecast_scale import ForecastScaleDashboard
 import views.settings as settings
 from modules.log_simulator import LogDataLoader
+from modules.predict_simulator import PredictDataLoader
 
 # Page configuration
 st.set_page_config(
@@ -26,7 +25,6 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# Custom CSS
 st.markdown("""
 <style>
     .main-header {
@@ -64,184 +62,197 @@ def init_session_state():
     """Initialize all session state variables"""
     if 'tracer' not in st.session_state:
         st.session_state.tracer = LogTracer()
-    
     if 'dashboard' not in st.session_state:
         st.session_state.dashboard = MainDashboard()
-    
     if 'forecast_dashboard' not in st.session_state:
         st.session_state.forecast_dashboard = ForecastScaleDashboard()
     
-    if 'loader' not in st.session_state:
-        st.session_state.loader = None
-    
-    if 'log_iter' not in st.session_state:
-        st.session_state.log_iter = None
-    
-    if 'simulator_running' not in st.session_state:
-        st.session_state.simulator_running = False
-    
-    if 'total_logs_processed' not in st.session_state:
-        st.session_state.total_logs_processed = 0
-    
-    if 'start_time' not in st.session_state:
-        st.session_state.start_time = None
-    
-    if 'speed_multiplier' not in st.session_state:
-        st.session_state.speed_multiplier = settings.DEFAULT_SPEED_MULTIPLIER
-    
+    # Log Simulator state
+    if 'log_loader' not in st.session_state:
+        st.session_state.log_loader = None
+    if 'log_simulator_running' not in st.session_state:
+        st.session_state.log_simulator_running = False
+    if 'log_total_processed' not in st.session_state:
+        st.session_state.log_total_processed = 0
+    # Always use settings values (not cached in session_state)
     if 'log_file_path' not in st.session_state:
         st.session_state.log_file_path = settings.DEFAULT_LOG_FILE
+    if 'log_speed_multiplier' not in st.session_state:
+        st.session_state.log_speed_multiplier = settings.DEFAULT_SPEED_MULTIPLIER
     
-    if 'batch_size' not in st.session_state:
-        st.session_state.batch_size = settings.BATCH_SIZE
+    # Forecast Simulator state
+    if 'predict_loader' not in st.session_state:
+        st.session_state.predict_loader = None
+    if 'predict_simulator_running' not in st.session_state:
+        st.session_state.predict_simulator_running = False
+    if 'predict_total_processed' not in st.session_state:
+        st.session_state.predict_total_processed = 0
+    if 'predict_file_path' not in st.session_state:
+        st.session_state.predict_file_path = "cache/simulated_data.csv"
+    if 'predict_speed_multiplier' not in st.session_state:
+        st.session_state.predict_speed_multiplier = settings.DEFAULT_SPEED_MULTIPLIER
 
 def stream_next_log():
     """Stream the next batch of logs from the loader and add to tracer"""
-    if st.session_state.loader is None:
+    if st.session_state.log_loader is None:
         return False
     
     try:
-        batch = st.session_state.loader.get_next_batch(st.session_state.batch_size)
+        # Use settings.BATCH_SIZE directly instead of cached value
+        batch = st.session_state.log_loader.get_next_batch(settings.BATCH_SIZE)
         if batch:
             for log in batch:
                 st.session_state.tracer.add_log(log)
                 st.session_state.dashboard.add_log(log)
-                st.session_state.forecast_dashboard.add_log(log)
-                st.session_state.total_logs_processed += 1
+                st.session_state.log_total_processed += 1
             return True
         else:
-            # End of stream
-            st.session_state.simulator_running = False
+            st.session_state.log_simulator_running = False
             return False
     except Exception as e:
         st.error(f"Stream error: {e}")
-        st.session_state.simulator_running = False
+        st.session_state.log_simulator_running = False
+        return False
+
+def stream_next_forecast():
+    """Stream the next batch of forecast data"""
+    if st.session_state.predict_loader is None:
+        return False
+    
+    try:
+        # Use settings.BATCH_SIZE directly instead of cached value
+        batch = st.session_state.predict_loader.get_next_batch(settings.BATCH_SIZE)
+        if batch:
+            for data in batch:
+                st.session_state.forecast_dashboard.add_data(data)
+                st.session_state.predict_total_processed += 1
+            return True
+        else:
+            st.session_state.predict_simulator_running = False
+            return False
+    except Exception as e:
+        st.error(f"Forecast stream error: {e}")
+        st.session_state.predict_simulator_running = False
         return False
 
 def sidebar_controls():
     """Render sidebar controls"""
-    st.sidebar.title("⚙️ Control Panel")
+    st.sidebar.title("Control Panel")
     
-    # Simulator status
-    status = "🟢 Running" if st.session_state.simulator_running else "🔴 Stopped"
-    st.sidebar.markdown(f"### Status: {status}")
+    # Log Simulator Control
+    st.sidebar.subheader("Log Simulator")
     
-    # Control buttons
+    log_status = "Running" if st.session_state.log_simulator_running else "Stopped"
+    st.sidebar.text(f"Status: {log_status}")
+    
     col1, col2 = st.sidebar.columns(2)
-    
     with col1:
-        if st.button("▶️ Start", width='stretch', disabled=st.session_state.simulator_running):
-            # Create loader
-            st.session_state.loader = LogDataLoader(
+        if st.button("Start", key="log_start", disabled=st.session_state.log_simulator_running):
+            st.session_state.log_loader = LogDataLoader(
                 st.session_state.log_file_path,
-                speed_multiplier=st.session_state.speed_multiplier,
+                speed_multiplier=st.session_state.log_speed_multiplier,
                 shuffle=False,
                 loop=True
             )
-            st.session_state.simulator_running = True
-            st.session_state.start_time = time.time()
+            st.session_state.log_simulator_running = True
             st.rerun()
     
     with col2:
-        if st.button("⏸️ Stop", width='stretch', disabled=not st.session_state.simulator_running):
-            st.session_state.simulator_running = False
-            st.session_state.loader = None
+        if st.button("Stop", key="log_stop", disabled=not st.session_state.log_simulator_running):
+            st.session_state.log_simulator_running = False
+            st.session_state.log_loader = None
             st.rerun()
     
-    # Clear logs button
-    if st.sidebar.button("🗑️ Clear Logs", width='stretch'):
+    if st.sidebar.button("Clear", key="log_clear"):
         st.session_state.tracer.clear_logs()
         st.session_state.dashboard.clear_logs()
-        st.session_state.forecast_dashboard.clear_logs()
-        st.session_state.total_logs_processed = 0
+        st.session_state.log_total_processed = 0
         st.rerun()
     
-    st.sidebar.divider()
-    
-    # Speed control
-    st.sidebar.subheader("🚀 Simulation Speed")
-    
-    selected_speed_label = st.sidebar.select_slider(
-        "Speed Multiplier",
-        options=list(settings.SPEED_OPTIONS.keys()),
-        value="5x (Fast)",
-        help="Control how fast logs are simulated"
-    )
-    
-    new_speed = settings.SPEED_OPTIONS[selected_speed_label]
-    
-    # Update speed if changed
-    if new_speed != st.session_state.speed_multiplier:
-        st.session_state.speed_multiplier = new_speed
-        if st.session_state.loader is not None:
-            st.session_state.loader.set_speed(new_speed)
-        st.sidebar.success(f"Speed updated to {selected_speed_label}")
-    
-    # Batch size control
-    st.sidebar.subheader("📦 Batch Size")
-    
-    batch_size = st.sidebar.slider(
-        "Logs per batch",
-        min_value=1,
-        max_value=100,
-        value=st.session_state.batch_size,
-        step=1,
-        help="Number of logs to load per refresh cycle"
-    )
-    
-    if batch_size != st.session_state.batch_size:
-        st.session_state.batch_size = batch_size
+    st.sidebar.text(f"Processed: {st.session_state.log_total_processed}")
     
     st.sidebar.divider()
     
-    # File selection
-    st.sidebar.subheader("📁 Log File")
+    # Forecast Simulator Control
+    st.sidebar.subheader("Forecast Simulator")
     
-    log_file = st.sidebar.text_input(
-        "File Path",
-        value=st.session_state.log_file_path,
-        help="Path to log file"
-    )
+    predict_status = "Running" if st.session_state.predict_simulator_running else "Stopped"
+    st.sidebar.text(f"Status: {predict_status}")
     
-    if log_file != st.session_state.log_file_path:
-        st.session_state.log_file_path = log_file
-        st.session_state.loader = None  # Reset loader
-        st.sidebar.info("File path updated. Stop and restart to load new file.")
+    col3, col4 = st.sidebar.columns(2)
+    with col3:
+        if st.button("Start", key="predict_start", disabled=st.session_state.predict_simulator_running):
+            st.session_state.predict_loader = PredictDataLoader(
+                st.session_state.predict_file_path,
+                speed_multiplier=st.session_state.predict_speed_multiplier,
+                shuffle=False,
+                loop=True
+            )
+            st.session_state.predict_simulator_running = True
+            st.rerun()
+    
+    with col4:
+        if st.button("Stop", key="predict_stop", disabled=not st.session_state.predict_simulator_running):
+            st.session_state.predict_simulator_running = False
+            st.session_state.predict_loader = None
+            st.rerun()
+    
+    if st.sidebar.button("Clear", key="predict_clear"):
+        st.session_state.forecast_dashboard.clear_data()
+        st.session_state.predict_total_processed = 0
+        st.rerun()
+    
+    st.sidebar.text(f"Processed: {st.session_state.predict_total_processed}")
     
     st.sidebar.divider()
     
-    # Statistics
-    st.sidebar.subheader("📊 Statistics")
-    st.sidebar.metric("Logs Processed", st.session_state.total_logs_processed)
-    
-    if st.session_state.start_time is not None:
-        elapsed = time.time() - st.session_state.start_time
-        st.sidebar.metric("Runtime", f"{elapsed:.1f}s")
+    # Settings
+    with st.sidebar.expander("Settings"):
+        st.text("Log Speed")
         
-        if st.session_state.total_logs_processed > 0 and elapsed > 0:
-            rate = st.session_state.total_logs_processed / elapsed
-            st.sidebar.metric("Processing Rate", f"{rate:.1f} logs/s")
-    
-    st.sidebar.divider()
-    
-    # About
-    with st.sidebar.expander("ℹ️ About"):
-        st.markdown("""
-        **Log Monitor Dashboard**
+        # Find current speed key for the value
+        current_log_speed_key = None
+        for key, val in settings.SPEED_OPTIONS.items():
+            if val == st.session_state.log_speed_multiplier:
+                current_log_speed_key = key
+                break
+        if current_log_speed_key is None:
+            current_log_speed_key = "5x (Fast)"
         
-        A CloudWatch-style dashboard for monitoring server request logs in real-time.
+        log_speed = st.select_slider(
+            "log_speed",
+            options=list(settings.SPEED_OPTIONS.keys()),
+            value=current_log_speed_key,
+            label_visibility="collapsed"
+        )
+        # Update speed multiplier in session state
+        st.session_state.log_speed_multiplier = settings.SPEED_OPTIONS[log_speed]
+        # Update running loader if exists
+        if st.session_state.log_loader:
+            st.session_state.log_loader.set_speed(st.session_state.log_speed_multiplier)
         
-        **Features:**
-        - Real-time log simulation
-        - Multiple view modes
-        - Time-series analysis
-        - Adjustable playback speed
+        st.text("Forecast Speed")
         
-        **Views:**
-        1. Terminal View - Raw log format
-        2. Table View - Structured data
-        3. Time-Series - Statistical analysis
-        """)
+        # Find current speed key for the value
+        current_predict_speed_key = None
+        for key, val in settings.SPEED_OPTIONS.items():
+            if val == st.session_state.predict_speed_multiplier:
+                current_predict_speed_key = key
+                break
+        if current_predict_speed_key is None:
+            current_predict_speed_key = "5x (Fast)"
+        
+        predict_speed = st.select_slider(
+            "predict_speed",
+            options=list(settings.SPEED_OPTIONS.keys()),
+            value=current_predict_speed_key,
+            label_visibility="collapsed"
+        )
+        # Update speed multiplier in session state
+        st.session_state.predict_speed_multiplier = settings.SPEED_OPTIONS[predict_speed]
+        # Update running loader if exists
+        if st.session_state.predict_loader:
+            st.session_state.predict_loader.set_speed(st.session_state.predict_speed_multiplier)
 
 def main():
     """Main application function"""
@@ -252,10 +263,10 @@ def main():
     sidebar_controls()
     
     # Header
-    st.markdown('<div class="main-header">📊 Log Monitor Dashboard</div>', unsafe_allow_html=True)
+    st.markdown('<div class="main-header">Log Monitor Dashboard</div>', unsafe_allow_html=True)
 
     # Navigation tabs
-    tab1, tab2, tab3 = st.tabs(["📋 Raw Log View", "📊 Main Dashboard", "🔮 Forecast & Scaling"])
+    tab1, tab2, tab3 = st.tabs(["Raw Log View", "Main Dashboard", "Forecast & Scaling"])
     
     with tab1:
         # Raw Log View - Sub-tabs for different views
@@ -281,14 +292,21 @@ def main():
         st.session_state.dashboard.render()
     with tab3:
         # Forecast & Auto-scaling Dashboard
-        st.session_state.forecast_dashboard.render(st.session_state.tracer.logs_buffer)
-    
-    # Auto-refresh when simulator is running
-    if st.session_state.simulator_running:
-        # Stream next log
-        stream_next_log()
-        time.sleep(settings.REFRESH_INTERVAL)
-        st.rerun()
+        st.session_state.forecast_dashboard.render()
+
 
 if __name__ == "__main__":
     main()
+    should_refresh = False
+    
+    if st.session_state.log_simulator_running:
+        stream_next_log()
+        should_refresh = True
+    
+    if st.session_state.predict_simulator_running:
+        stream_next_forecast()
+        should_refresh = True
+    
+    if should_refresh:
+        time.sleep(settings.REFRESH_INTERVAL)
+        st.rerun()

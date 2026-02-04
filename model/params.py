@@ -1,9 +1,4 @@
-"""
-Configuration parameters for baseline LSTM and enhanced Seq2Seq models.
-"""
-
-from dataclasses import dataclass, field
-from typing import Optional
+from dataclasses import dataclass
 
 
 @dataclass
@@ -19,34 +14,25 @@ class BaselineParams:
     # Paths
     data_dir: str = './dataset'
     save_dir: str = './model/checkpoints/lstm_15p.pth'
-    scaler_path: str = './model/checkpoints/scaler_lstm_15p.pkl'
+    scaler_path: str = './model/checkpoints/scaler.pkl'
 
 
 @dataclass
 class EnhancedParams:
     """Parameters for the enhanced Seq2Seq model from architecture document."""
     data_dir: str = './dataset'
-    save_dir: str = './checkpoints/seq2seq'
-    scaler_path: str = './checkpoints/scaler_seq2seq.pkl'
-    train_window: int = 120 
-    # LAG_FEATURES = [11, 16, 24, 30]
+    save_dir: str = './model/checkpoints/seq2seq_15p.pth'
+    scaler_path: str = './model/checkpoints/scaler.pkl'
+    train_window: int = 15
+    LAG_FEATURES = [31, 32, 34, 35]
     
-    # Model architecture
-    hidden_size: int = 128
-    num_layers: int = 2
+    # Model architecture (matching trained model)
+    hidden_size: int = 267
+    num_layers: int = 1
     dropout: float = 0.2
 
 
 def get_params(model_type: str = "baseline"):
-    """
-    Get parameter configuration for specified model type.
-    
-    Args:
-        model_type: Either 'baseline' or 'enhanced'
-        
-    Returns:
-        Parameter configuration object
-    """
     if model_type == "baseline":
         return BaselineParams()
     elif model_type == "enhanced":

@@ -5,44 +5,25 @@ import os
 import pandas as pd
 from datetime import datetime
 
+from traffic_monitor.modules.log_simulator import LogDataLoader
+
 sys.path.append(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from preprocessing.data_parser import load_raw_data, preprocess_data, load_raw_data_online
 
-class LogDataLoader:
+class PredictDataLoader:
     def __init__(self, file_path, speed_multiplier=1.0, shuffle=False, loop=False):
-        """
-        Args:
-            file_path: Path to the log file
-            speed_multiplier: Speed multiplier (1.0 = real-time, 2.0 = 2x speed, 0.5 = half speed)
-            shuffle: If True, randomize the order of logs (warning: breaks timestamp order)
-            loop: If True, repeat dataset infinitely; if False, stop after one pass
-        """
         self.file_path = file_path
         self.speed_multiplier = speed_multiplier
         self.shuffle = shuffle
         self.loop = loop
         
         # Load raw lines
-        self.lines = load_raw_data_online(file_path)
-        self.total_lines = len(self.lines)
+        self._load_cached_data()
         self.current_index = 0
         
-        # Preprocess all lines once for efficiency
-        self._preprocess_all()
-        
-    def _preprocess_all(self):
-        """Preprocess all log lines once and calculate time deltas."""
-        self.parsed_logs = []
-        df, _ = preprocess_data(self.lines)
-        if not df.empty:
-            # Convert timestamp to datetime (vectorized operation)
-            df["timestamp"] = pd.to_datetime(
-                df["timestamp"],
-                format="%d/%b/%Y:%H:%M:%S %z"
-            )
-
-            self.parsed_logs = df.to_dict('records')
-        self.total_logs = len(self.parsed_logs)
+    def _load_cached_data(self):
+        self.lines = pd.read_csv(self.file_path).to_dict('records')
+        self.total_lines = len(self.lines)
     
     def _parse_timestamp(self, timestamp_str):
         """Parse timestamp string to datetime object."""
@@ -53,30 +34,30 @@ class LogDataLoader:
     
     def __len__(self):
         """Return the number of logs in the dataset."""
-        return self.total_logs
+        return self.total_lines
     
     def __iter__(self):
         """Return the iterator object (self)."""
         self.current_index = 0
         if self.shuffle:
-            random.shuffle(self.parsed_logs)
+            random.shuffle(self.lines)
         return self
     
     def __next__(self):
         """Yield the next log entry with timestamp-based delay."""
-        if self.current_index >= self.total_logs:
+        if self.current_index >= self.total_lines:
             if self.loop:
                 self.current_index = 0
                 if self.shuffle:
-                    random.shuffle(self.parsed_logs)
+                    random.shuffle(self.lines)
             else:
                 raise StopIteration
         
-        log = self.parsed_logs[self.current_index]
+        log = self.lines[self.current_index]
         
         # Apply delay based on timestamp difference (scaled by speed multiplier)
         if self.current_index > 0:
-            delay = 1 / self.speed_multiplier
+            delay = 3 / self.speed_multiplier
             if delay > 0:
                 time.sleep(delay)
         
@@ -85,15 +66,15 @@ class LogDataLoader:
     
     def _get_next_no_delay(self):
         """Get next log without applying delay (for batch streaming)."""
-        if self.current_index >= self.total_logs:
+        if self.current_index >= self.total_lines:
             if self.loop:
                 self.current_index = 0
                 if self.shuffle:
-                    random.shuffle(self.parsed_logs)
+                    random.shuffle(self.lines)
             else:
                 raise StopIteration
         
-        log = self.parsed_logs[self.current_index]
+        log = self.lines[self.current_index]
         self.current_index += 1
         return log
 
@@ -137,7 +118,7 @@ class LogDataLoader:
                 if len(batch) >= batch_size:
                     # Apply delay once per batch
                     if batch_count > 0:
-                        delay = 1 / self.speed_multiplier
+                        delay = 3 / self.speed_multiplier
                         if delay > 0:
                             time.sleep(delay)
                     
@@ -177,16 +158,36 @@ class LogDataLoader:
         batch = []
         
         for _ in range(batch_size):
-            if self.current_index >= self.total_logs:
+            if self.current_index >= self.total_lines:
                 if self.loop:
                     self.current_index = 0
                     if self.shuffle:
-                        random.shuffle(self.parsed_logs)
+                        random.shuffle(self.lines)
                 else:
                     break
             
-            if self.current_index < self.total_logs:
-                batch.append(self.parsed_logs[self.current_index])
+            if self.current_index < self.total_lines:
+                batch.append(self.lines[self.current_index])
                 self.current_index += 1
         
         return batch
+
+    
+# Example usage
+if __name__ == "__main__":
+    simulator = PredictDataLoader(
+        file_path='./cache/simulated_data.csv',
+        speed_multiplier=2.0,
+        shuffle=True,
+        loop=True
+    )
+    
+    # Stream logs one by one
+    for i, log in enumerate(simulator.stream(max_logs=5)):
+        print(log)
+    
+    # Stream logs in batches
+    for i, batch in enumerate(simulator.batch_stream(batch_size=3, max_batches=2)):
+        print(f"Batch {i+1}:")
+        for log in batch:
+            print(log)

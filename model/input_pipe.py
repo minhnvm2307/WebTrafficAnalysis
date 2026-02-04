@@ -47,29 +47,6 @@ class Seq2SeqDataset(Dataset):
             'y_target': torch.tensor(y_target)
         }
 
-class ScalerWrapper:
-    def __init__(self, scaler_path: str, model_type: str = "baseline"):
-        self.model_type = model_type
-        self.scaler = joblib.load(scaler_path)
-
-    def transform(self, data: np.ndarray) -> np.ndarray:
-        if self.model_type == "baseline":
-            return self.scaler.transform(data)
-        elif self.model_type == "enhanced":
-            data_log = np.log1p(data)
-            return self.scaler.transform(data_log)
-        else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
-        
-    def inverse_transform(self, data: np.ndarray) -> np.ndarray:
-        if self.model_type == "baseline":
-            return self.scaler.inverse_transform(data)
-        elif self.model_type == "enhanced":
-            data_inv = self.scaler.inverse_transform(data)
-            return np.expm1(data_inv)  # Inverse of log1p
-        else:
-            raise ValueError(f"Unknown model type: {self.model_type}")
-
 
 def load_data(filepath, chunk_time='15min') -> pd.DataFrame:
     """Load and prepare hourly time series"""
@@ -83,25 +60,24 @@ def load_data(filepath, chunk_time='15min') -> pd.DataFrame:
     
     return df_series
 
-def make_features(data: pd.DataFrame, lags=[1, 3, 6, 12, 24]):
+def make_features(data: pd.DataFrame, mode='train', scaler=None):
     df = data.copy()
     
-    df['count_log'] = np.log1p(df['count'])
+    df['target_scaled'] = scaler.transform(df[['target']])
     
+    # 3. Thông tin thời gian CƠ BẢN
     df['timestamp'] = pd.to_datetime(df['timestamp'])
-    hour = df['timestamp'].dt.hour
-    dayofweek = df['timestamp'].dt.dayofweek
-
-    df['hour_sin'] = np.sin(2 * np.pi * hour / 24.0)
-    df['hour_cos'] = np.cos(2 * np.pi * hour / 24.0)
-    df['day_sin'] = np.sin(2 * np.pi * dayofweek / 7.0)
-    df['day_cos'] = np.cos(2 * np.pi * dayofweek / 7.0)
+    df['hour'] = df['timestamp'].dt.hour
+    df['dayofweek'] = df['timestamp'].dt.dayofweek
+    df['is_weekend'] = (df['dayofweek'] >= 5).astype(int)
     
-    df['is_weekend'] = (dayofweek >= 5).astype(float)
+    for lag in [31, 32, 34, 35]:
+        df[f'lag_{lag}'] = df['target_scaled'].shift(lag)
     
-    for lag in lags:
-        df[f'lag_{lag}'] = df['count_log'].shift(lag)
+    # 6. Binary features cho giờ cao điểm
+    df['is_peak_hour'] = ((df['hour'] >= 9) & (df['hour'] <= 17)).astype(int)
     
-    df = df.dropna().reset_index(drop=True)
+    # Fill NaN values
+    df = df.bfill().fillna(0)
     
-    return df.drop(columns=['count'])
+    return df, scaler

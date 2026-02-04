@@ -6,505 +6,516 @@ import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
 from datetime import datetime, timedelta
-from pathlib import Path
+import requests
+import time
+from sklearn.metrics import mean_absolute_error, mean_squared_error
 
 from model.params import get_params
-import views.settings as settings
-
-# Import predictor utilities
-try:
-    from traffic_monitor.server.utils import Predictor
-except ImportError:
-    Predictor = None
-    st.warning("⚠️ ML Server utilities not available. Forecast features may be limited.")
-
+from traffic_monitor.views import settings
+from traffic_monitor.modules.predict_simulator import PredictDataLoader
 
 class ForecastScaleDashboard:
     def __init__(self):
-        self.logs_buffer = []
-        self.max_buffer_size = settings.MAX_LOGS_DISPLAY
-        self.config = get_params("baseline")
+        self.forecast_buffer = []  # Store predictions over time
+        self.max_buffer_size = 1000
+        self.config = get_params("enhanced")
+        self.api_url = "http://localhost:8000"
+        self.simulator = None
+        self.is_forecasting = False
+        self.data_buffer = []  # Buffer for incoming data
+        self.anomaly_info = None  # Store anomaly detection results
+        self.scaling_info = None  # Store scaling recommendations
+        self.cost_info = None  # Store cost estimates
         
-        # Load padding data from cached CSV
-        self._load_padding_data()
-        
-        # Initialize predictor
-        if Predictor:
-            try:
-                self.predictor = Predictor(model_type="baseline")
-            except Exception as e:
-                st.error(f"Failed to load predictor: {e}")
-                self.predictor = None
-        else:
-            self.predictor = None
+    def add_data(self, data):
+        """Add incoming data to buffer"""
+        self.data_buffer.append(data)
+        if len(self.data_buffer) > self.max_buffer_size:
+            self.data_buffer = self.data_buffer[-self.max_buffer_size:]
     
-    def _load_padding_data(self):
-        """Load padding data from cached CSV file"""
+    def clear_data(self):
+        """Clear all data buffers"""
+        self.forecast_buffer = []
+        self.data_buffer = []
+        self.is_forecasting = False
+        
+    def clear_forecast(self):
+        """Clear forecast data"""
+        self.forecast_buffer = []
+        self.is_forecasting = False
+    
+    def start_simulator(self, speed_multiplier=5.0):
+        """Initialize the predict simulator"""
+        if self.simulator is None:
+            self.simulator = PredictDataLoader(
+                file_path='./cache/simulated_data.csv',
+                speed_multiplier=speed_multiplier,
+                shuffle=False,
+                loop=False
+            )
+            self.is_forecasting = True
+    
+    def stop_simulator(self):
+        """Stop the simulator"""
+        self.simulator = None
+        self.is_forecasting = False
+    
+    def stream_next_forecast(self, forecast_steps=24):
+        """Stream next batch of data and make predictions"""
+        if self.simulator is None:
+            return None, "Simulator not started"
+        
         try:
-            cache_path = Path('cache/padding_train_15min.csv')
-            if cache_path.exists():
-                self.padding_df_resampled = pd.read_csv(cache_path)
-                self.padding_df_resampled['timestamp'] = pd.to_datetime(self.padding_df_resampled['timestamp'])
-                st.sidebar.success(f"✅ Loaded {len(self.padding_df_resampled)} 15-min intervals from cache")
-            else:
-                st.sidebar.error(f"❌ Cache file not found: {cache_path}")
-                # Create empty padding dataframe as fallback
-                self.padding_df_resampled = pd.DataFrame({
-                    'timestamp': [],
-                    'request_count': [],
-                    'bytes': []
-                })
-        except Exception as e:
-            st.sidebar.error(f"❌ Failed to load padding data: {e}")
-            # Create empty padding dataframe as fallback
-            self.padding_df_resampled = pd.DataFrame({
-                'timestamp': [],
-                'request_count': [],
-                'bytes': []
-            })
-    
-    def add_log(self, log):
-        """Add a new log entry to the buffer"""
-        self.logs_buffer.append(log)
-        if len(self.logs_buffer) > self.max_buffer_size:
-            self.logs_buffer.pop(0)
-    
-    def clear_logs(self):
-        """Clear all logs from buffer"""
-        self.logs_buffer = []
-    
-    def _prepare_data_for_forecast(self):
-        """
-        Prepare resampled data with padding for forecasting
-        Returns: DataFrame with at least 64 15-min intervals (using padding if needed)
-        """
-        if not self.logs_buffer:
-            return None, "No data available"
-        
-        # Convert logs to DataFrame
-        df = pd.DataFrame(self.logs_buffer)
-        if 'timestamp' not in df.columns:
-            return None, "Missing timestamp column"
-        
-        df['timestamp'] = pd.to_datetime(df['timestamp'])
-        df = df.sort_values('timestamp')
-        df['request_count'] = 1  # Each log is 1 request
-        
-        # Resample to 15-minute intervals
-        df_resampled = df.set_index('timestamp').resample('15min').agg({
-            'request_count': 'sum',
-            'bytes': 'sum'
-        }).reset_index()
-        
-        # Check if we have at least 1 15-min interval
-        if len(df_resampled) < 1:
-            return None, "Need at least 1 complete 15-min interval"
-        
-        # Pad with training data if needed (require 64 intervals for model)
-        if len(df_resampled) < self.config.train_window:
-            needed = self.config.train_window - len(df_resampled)
+            # Get next batch from simulator
+            batch = self.simulator.get_next_batch(batch_size=forecast_steps)
             
-            if len(self.padding_df_resampled) >= needed:
-                padding_slice = self.padding_df_resampled.tail(needed).copy()
-                
-                # Shift padding timestamps to align before current data
-                time_shift = df_resampled['timestamp'].iloc[0] - padding_slice['timestamp'].iloc[-1] - timedelta(minutes=15)
-                padding_slice['timestamp'] = padding_slice['timestamp'] + time_shift
-                
-                # Combine padding + current data
-                df_combined = pd.concat([padding_slice, df_resampled]).reset_index(drop=True)
-                
-                return df_combined, None
-            else:
-                return None, f"Insufficient padding data. Need {needed} intervals but only have {len(self.padding_df_resampled)}"
-        
-        return df_resampled, None
+            if not batch:
+                self.is_forecasting = False
+                return None, "End of data stream"
+            
+            # Add batch data to buffer
+            self.add_data(batch)
+            
+            # Need enough historical data for prediction (lookback window)
+            if len(self.data_buffer) < self.config.train_window:
+                return None, f"Accumulating data... {len(self.data_buffer)}/{self.config.train_window}"
+            
+            # Call API for predictions when we have enough data
+            data = self.data_buffer[-self.config.train_window:]
+            result, error = self.call_forecast_api(data, forecast_steps)
+            
+            if error:
+                return None, error
+            
+            # Store predictions
+            self.forecast_buffer = result
+            
+            return True, None
+            
+        except StopIteration:
+            self.is_forecasting = False
+            return None, "End of data stream"
+        except Exception as e:
+            return None, f"Error: {str(e)}"
     
-    def _generate_forecast(self, df_resampled, forecast_horizon=10):
-        """
-        Generate traffic forecast using trained model
-        
-        Args:
-            df_resampled: DataFrame with 15-min aggregated data
-            forecast_horizon: Number of 15-min intervals to predict
-        
-        Returns:
-            tuple: (forecast_values, future_timestamps, confidence_interval)
-        """
-        if self.predictor is None:
-            return None, None, None
-        
+    def call_forecast_api(self, data, forecast_steps=24):
+        """Call ML server API for forecast"""
         try:
-            # Predict using trained model
-            forecast_values = self.predictor.predict(
-                df_resampled['request_count'].values,
-                predict_horizon=forecast_horizon
+            # Check API health
+            health_response = requests.get(f"{self.api_url}/health", timeout=2)
+            if health_response.status_code != 200:
+                return None, "ML Server is not healthy"
+            
+            # Convert data to proper format (list of dicts)
+            if isinstance(data, list) and len(data) > 0:
+                if not isinstance(data[0], dict):
+                    return None, "Data format error: Expected list of dictionaries"
+                api_data = data
+            else:
+                return None, "Data format error: Expected non-empty list"
+            
+            # Call forecast endpoint
+            response = requests.post(
+                f"{self.api_url}/forecast",
+                json={"data": api_data, "forecast_steps": forecast_steps},
+                timeout=30
             )
             
-            # Generate future timestamps
-            last_timestamp = df_resampled['timestamp'].iloc[-1]
-            future_timestamps = [
-                last_timestamp + timedelta(minutes=15*(i+1))
-                for i in range(forecast_horizon)
-            ]
-            
-            # Calculate confidence interval using recent standard deviation
-            recent_std = df_resampled['request_count'].tail(30).std()
-            confidence_interval = {
-                'lower': (forecast_values - 1.96 * recent_std).clip(min=0),
-                'upper': (forecast_values + 1.96 * recent_std)
-            }
-            
-            return forecast_values, future_timestamps, confidence_interval
-            
+            if response.status_code == 200:
+                # Get the List[Dict]: predictions with timestamps from response json
+                preds = response.json().get("predictions", [])
+                timestamps = response.json().get("timestamps", [])
+                result = [{"timestamp": ts, "prediction": pred} for ts, pred in zip(timestamps, preds)]
+                return result, None
+            else:
+                return None, f"API Error: {response.status_code} - {response.text}"
+        
+        except requests.exceptions.ConnectionError:
+            return None, "Cannot connect to ML Server. Please start it with: uvicorn traffic_monitor.server.ml_server:app --reload --port 8000"
         except Exception as e:
-            st.error(f"Forecast failed: {e}")
-            return None, None, None
+            return None, f"Error calling API: {str(e)}"
     
-    def render_forecast_view(self, time_window_key="15min"):
-        """Render the forecast dashboard with predictions"""
-        st.subheader("🔮 Traffic Forecast Dashboard")
-        
-        if not self.logs_buffer:
-            st.info("⏳ Waiting for data... Start the simulator to see predictions.")
-            return
-        
-        # Prepare data
-        df_prepared, error = self._prepare_data_for_forecast()
-        
-        if error:
-            st.warning(f"⚠️ {error}")
-            st.info("Continue collecting data to enable forecasting...")
-            return
-        
-        # Display data preparation info
-        col1, col2, col3 = st.columns(3)
-        with col1:
-            actual_intervals = len([ts for ts in df_prepared['timestamp'] 
-                                   if ts >= pd.Timestamp(self.logs_buffer[0]['timestamp'])])
-            st.metric("Actual 15-min Intervals", actual_intervals)
-        with col2:
-            padded_intervals = len(df_prepared) - actual_intervals
-            st.metric("Padded Intervals (from training)", padded_intervals)
-        with col3:
-            st.metric("Total Intervals for Model", len(df_prepared))
-        
-        # Generate forecast
-        forecast_horizon = 10  # Predict next 10 x 15-min intervals
-        forecast_values, future_timestamps, confidence_interval = self._generate_forecast(
-            df_prepared, forecast_horizon
-        )
-        
-        if forecast_values is None:
-            st.error("❌ Failed to generate forecast")
-            return
-        
-        # Create visualization
-        st.subheader("📈 Request Count: Historical + Predicted")
-        
+    def call_anomaly_api(self, data):
+        """Call anomaly detection API"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/anomaly-detect",
+                json={"data": data},
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json(), None
+            return None, f"API Error: {response.status_code}"
+        except Exception as e:
+            return None, str(e)
+    
+    def call_scaling_api(self, predictions):
+        """Call scaling recommendation API"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/recommend-scaling",
+                json={"data": predictions},
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json(), None
+            return None, f"API Error: {response.status_code}"
+        except Exception as e:
+            return None, str(e)
+    
+    def call_cost_api(self, predictions):
+        """Call cost estimation API"""
+        try:
+            response = requests.post(
+                f"{self.api_url}/cost-estimate",
+                json={"data": predictions},
+                timeout=10
+            )
+            if response.status_code == 200:
+                return response.json(), None
+            return None, f"API Error: {response.status_code}"
+        except Exception as e:
+            return None, str(e)
+    
+    def plot_forecast(self):
+        """
+        Plot the data buffer (historical/current) and future predictions separately
+        Historical data in green, Future predictions in red (not overlapping)
+        """
+        if len(self.data_buffer) == 0:
+            return None
+            
         fig = go.Figure()
         
-        # Separate actual and padded historical data
-        split_idx = len(df_prepared) - actual_intervals
-        df_padded = df_prepared.iloc[:split_idx]
-        df_actual = df_prepared.iloc[split_idx:]
-        
-        # Plot padded data (lighter color)
-        if len(df_padded) > 0:
+        # Plot historical/current data (actual traffic) in green
+        known_df = pd.DataFrame(self.data_buffer)
+        if 'timestamp' in known_df.columns and 'target' in known_df.columns:
+            known_df['timestamp'] = pd.to_datetime(known_df['timestamp'])
+            # Show last 200 points for better visibility
+            display_df = known_df.tail(200)
             fig.add_trace(go.Scatter(
-                x=df_padded['timestamp'],
-                y=df_padded['request_count'],
-                mode='lines',
-                name='Historical (Padding)',
-                line=dict(color='rgba(100, 100, 100, 0.4)', width=1, dash='dot'),
-                showlegend=True
-            ))
-        
-        # Plot actual historical data
-        fig.add_trace(go.Scatter(
-            x=df_actual['timestamp'],
-            y=df_actual['request_count'],
-            mode='lines+markers',
-            name='Current Data',
-            line=dict(color='#00BFFF', width=2),
-            marker=dict(size=6),
-            fill='tozeroy',
-            fillcolor='rgba(0, 191, 255, 0.2)'
-        ))
-        
-        # Plot forecast
-        fig.add_trace(go.Scatter(
-            x=future_timestamps,
-            y=forecast_values,
-            mode='lines+markers',
-            name='Forecast',
-            line=dict(color='#FF6B6B', width=2, dash='dash'),
-            marker=dict(size=8, symbol='star')
-        ))
-        
-        # Plot confidence interval
-        if confidence_interval:
-            # Upper bound
-            fig.add_trace(go.Scatter(
-                x=future_timestamps,
-                y=confidence_interval['upper'],
-                mode='lines',
-                name='95% Confidence Upper',
-                line=dict(color='rgba(255, 107, 107, 0.3)', width=1),
-                showlegend=False
+                x=display_df['timestamp'],
+                y=display_df['target'],
+                mode='lines+markers',
+                name='Historical Traffic',
+                line=dict(color='#2ECC71', width=2),
+                marker=dict(size=4, color='#2ECC71')
             ))
             
-            # Lower bound
-            fig.add_trace(go.Scatter(
-                x=future_timestamps,
-                y=confidence_interval['lower'],
-                mode='lines',
-                name='95% Confidence',
-                line=dict(color='rgba(255, 107, 107, 0.3)', width=1),
-                fill='tonexty',
-                fillcolor='rgba(255, 107, 107, 0.2)'
-            ))
+            # Get the last timestamp for connecting the forecast
+            last_timestamp = display_df['timestamp'].iloc[-1]
+            last_value = display_df['target'].iloc[-1]
+            
+            # Highlight anomaly if detected
+            if self.anomaly_info and self.anomaly_info.get('is_anomaly'):
+                fig.add_trace(go.Scatter(
+                    x=[last_timestamp],
+                    y=[last_value],
+                    mode='markers',
+                    name='⚠️ Anomaly',
+                    marker=dict(size=15, color='red', symbol='x', line=dict(width=2, color='darkred'))
+                ))
         
-        # Add vertical line to separate actual and forecast
-        if len(df_actual) > 0:
-            last_actual_time = df_actual['timestamp'].iloc[-1]
-            # Use shape instead of add_vline to avoid timestamp issues
-            fig.add_shape(
-                type="line",
-                x0=last_actual_time, x1=last_actual_time,
-                y0=0, y1=1,
-                yref="paper",
-                line=dict(color="yellow", width=2, dash="dash")
-            )
-            # Add annotation separately
-            fig.add_annotation(
-                x=last_actual_time,
-                y=1,
-                yref="paper",
-                text="Now",
-                showarrow=False,
-                yshift=10,
-                font=dict(color="yellow", size=12)
-            )
+        # Plot future predictions (not overlapping with actual data)
+        if len(self.forecast_buffer) > 0:
+            pred_df = pd.DataFrame(self.forecast_buffer)
+            if 'timestamp' in pred_df.columns and 'prediction' in pred_df.columns:
+                pred_df['timestamp'] = pd.to_datetime(pred_df['timestamp'])
+                # Remove duplicates and sort
+                pred_df = pred_df.drop_duplicates(subset=['timestamp']).sort_values('timestamp')
+                
+                # Only show predictions that are AFTER the current data
+                if 'last_timestamp' in locals():
+                    pred_df = pred_df[pred_df['timestamp'] > last_timestamp]
+                
+                if len(pred_df) > 0:
+                    # Add connecting point from last actual to first prediction
+                    first_pred_time = pred_df['timestamp'].iloc[0]
+                    first_pred_val = pred_df['prediction'].iloc[0]
+                    
+                    # Connection line
+                    fig.add_trace(go.Scatter(
+                        x=[last_timestamp, first_pred_time],
+                        y=[last_value, first_pred_val],
+                        mode='lines',
+                        name='Transition',
+                        line=dict(color='#FFA500', width=1, dash='dot'),
+                        showlegend=False
+                    ))
+                    
+                    # Future predictions
+                    fig.add_trace(go.Scatter(
+                        x=pred_df['timestamp'],
+                        y=pred_df['prediction'],
+                        mode='lines+markers',
+                        name='Future Forecast',
+                        line=dict(color='#E74C3C', width=2, dash='dash'),
+                        marker=dict(size=5, color='#E74C3C', symbol='diamond')
+                    ))
+                    
+                    # Add anomaly threshold bands if available
+                    if self.anomaly_info:
+                        mean = self.anomaly_info.get('mean_load', 0)
+                        std = self.anomaly_info.get('std_load', 0)
+                        threshold = self.anomaly_info.get('threshold', 2.5)
+                        
+                        upper_bound = mean + threshold * std
+                        lower_bound = mean - threshold * std
+                        
+                        # Add threshold bands
+                        all_timestamps = list(display_df['timestamp']) + list(pred_df['timestamp'])
+                        
+                        fig.add_trace(go.Scatter(
+                            x=all_timestamps,
+                            y=[upper_bound] * len(all_timestamps),
+                            mode='lines',
+                            name='Upper Threshold',
+                            line=dict(color='rgba(255,0,0,0.3)', width=1, dash='dot'),
+                            showlegend=False
+                        ))
+                        
+                        fig.add_trace(go.Scatter(
+                            x=all_timestamps,
+                            y=[lower_bound] * len(all_timestamps),
+                            mode='lines',
+                            name='Lower Threshold',
+                            line=dict(color='rgba(255,0,0,0.3)', width=1, dash='dot'),
+                            fill='tonexty',
+                            fillcolor='rgba(255,0,0,0.05)',
+                            showlegend=False
+                        ))
+                    
+                    # Show statistics
+                    pred_mean = pred_df['prediction'].mean()
+                    pred_std = pred_df['prediction'].std()
+                    st.caption(f"📊 Forecast Stats: Mean={pred_mean:.2f}, Std={pred_std:.2f}, Min={pred_df['prediction'].min():.2f}, Max={pred_df['prediction'].max():.2f}")
         
         fig.update_layout(
-            title='Traffic Forecast (15-minute intervals)',
-            xaxis_title='Time',
-            yaxis_title='Request Count per 15 min',
-            height=500,
+            title='Traffic Forecast - Historical Data → Future Predictions',
+            xaxis_title='Timestamp',
+            yaxis_title='Traffic Volume (Requests)',
             hovermode='x unified',
             template='plotly_dark',
+            height=500,
             showlegend=True,
             legend=dict(
-                yanchor="top",
-                y=0.99,
-                xanchor="left",
-                x=0.01
+                orientation="h",
+                yanchor="bottom",
+                y=1.02,
+                xanchor="right",
+                x=1
             )
         )
         
-        st.plotly_chart(fig, width='stretch')
+        return fig
         
-        # Forecast statistics
-        st.subheader("📊 Forecast Statistics")
-        
-        col1, col2, col3, col4 = st.columns(4)
-        
-        with col1:
-            current_load = int(df_actual['request_count'].iloc[-1]) if len(df_actual) > 0 else 0
-            st.metric("Current Load (15 min)", current_load)
-        
-        with col2:
-            avg_forecast = float(np.mean(forecast_values))
-            change_pct = ((avg_forecast - current_load) / current_load * 100) if current_load > 0 else 0
-            st.metric("Avg Predicted Load", f"{avg_forecast:.0f}", f"{change_pct:+.1f}%")
-        
-        with col3:
-            max_forecast = float(np.max(forecast_values))
-            st.metric("Peak Predicted Load", f"{max_forecast:.0f}")
-        
-        with col4:
-            time_to_peak = future_timestamps[np.argmax(forecast_values)]
-            minutes_to_peak = int((time_to_peak - df_actual['timestamp'].iloc[-1]).total_seconds() / 60)
-            st.metric("Time to Peak", f"{minutes_to_peak} min")
-        
-        # Show forecast details table
-        with st.expander("📋 Detailed Forecast Values"):
-            forecast_df = pd.DataFrame({
-                'Time': future_timestamps,
-                'Predicted Requests': forecast_values.round(0).astype(int),
-                'Lower Bound (95%)': confidence_interval['lower'].round(0).astype(int) if confidence_interval else None,
-                'Upper Bound (95%)': confidence_interval['upper'].round(0).astype(int) if confidence_interval else None
-            })
-            st.dataframe(forecast_df, width='stretch')
-        
-        # Insights and recommendations
-        st.subheader("💡 Insights & Recommendations")
-        
-        # Trend analysis
-        if avg_forecast > current_load * 1.2:
-            st.warning("📈 **Traffic is expected to increase significantly (+20%)** in the next 2.5 hours. Consider scaling up resources.")
-        elif avg_forecast < current_load * 0.8:
-            st.info("📉 **Traffic is expected to decrease (-20%)** in the next 2.5 hours. Potential opportunity to scale down.")
-        else:
-            st.success("➡️ **Traffic is expected to remain stable** in the next 2.5 hours. Current capacity should be sufficient.")
-        
-        # Capacity planning
-        avg_per_minute = avg_forecast / 15  # Convert 15-min to per-minute rate
-        max_per_minute = max_forecast / 15
-        
-        st.info(f"""
-        **Capacity Planning:**
-        - Average expected rate: **{avg_per_minute:.1f} requests/min**
-        - Peak expected rate: **{max_per_minute:.1f} requests/min**
-        - Forecast horizon: **{forecast_horizon * 15} minutes** (next 2.5 hours)
-        """)
-        
-        # Scaling Recommendation
-        self._render_scaling_recommendation(df_actual, avg_per_minute, max_per_minute, current_load)
     
-    def _render_scaling_recommendation(self, df_actual, avg_per_minute, max_per_minute, current_load):
-        """Render auto-scaling recommendation based on forecast"""
-        st.subheader("⚙️ Auto-Scaling Recommendation")
+    def render(self):
+        """Render the forecast dashboard"""
+        st.title("🔮 Traffic Forecast & Auto-Scaling")
+        st.markdown("ML-powered traffic prediction using Seq2Seq model with streaming inference")
         
-        # Configuration constants
-        MAX_CAPACITY_PER_INSTANCE = 1000  # requests per minute
-        UNIT_COST_PER_INSTANCE = 0.05  # $ per hour per instance
-        SCALE_UP_THRESHOLD = 0.75  # Scale up at 75% capacity
-        SCALE_DOWN_THRESHOLD = 0.30  # Scale down below 30% capacity
-        ANOMALY_THRESHOLD_SIGMA = 3.0
+        # Check if simulator is running (controlled by app.py)
+        is_active = st.session_state.get('predict_simulator_running', False)
         
-        # Initialize global state (simulate server state)
-        if 'current_instances' not in st.session_state:
-            st.session_state.current_instances = 1
-        if 'last_scale_time' not in st.session_state:
-            st.session_state.last_scale_time = datetime.now() - timedelta(minutes=10)
+        # Status section
+        status_col1, status_col2, status_col3 = st.columns(3)
         
-        current_instances = st.session_state.current_instances
+        with status_col1:
+            if is_active:
+                st.metric("Status", "🟢 Streaming")
+            else:
+                st.metric("Status", "⚪ Idle")
+        with status_col2:
+            st.metric("Data Points", len(self.data_buffer))
+        with status_col3:
+            st.metric("Predictions", len(self.forecast_buffer))
         
-        # Calculate required instances based on max predicted load
-        required_instances = max(1, int(np.ceil(max_per_minute / MAX_CAPACITY_PER_INSTANCE)))
+        # Show data range info
+        if len(self.data_buffer) > 0:
+            known_df = pd.DataFrame(self.data_buffer)
+            if 'target' in known_df.columns:
+                col1, col2, col3 = st.columns(3)
+                with col1:
+                    st.metric("Actual - Mean", f"{known_df['target'].mean():.2f}")
+                with col2:
+                    st.metric("Actual - Min", f"{known_df['target'].min():.2f}")
+                with col3:
+                    st.metric("Actual - Max", f"{known_df['target'].max():.2f}")
         
-        # Calculate capacity utilization
-        current_capacity = current_instances * MAX_CAPACITY_PER_INSTANCE
-        current_utilization = (current_load / 15) / current_capacity if current_capacity > 0 else 0
-        predicted_utilization = avg_per_minute / current_capacity if current_capacity > 0 else 0
-        
-        # Anomaly detection
-        try:
-            from traffic_monitor.server.utils import detect_anomaly
-            anomaly_result = detect_anomaly(df_actual, threshold_sigma=ANOMALY_THRESHOLD_SIGMA)
-            is_anomaly = anomaly_result['is_anomaly']
-        except:
-            is_anomaly = False
-            anomaly_result = {'reason': 'Anomaly detection unavailable', 'z_score': 0}
-        
-        # Cooldown logic
-        time_since_last_scale = (datetime.now() - st.session_state.last_scale_time).total_seconds() / 60
-        cooldown_remaining = max(0, 5 - time_since_last_scale)  # 5 min cooldown
-        in_cooldown = cooldown_remaining > 0
-        
-        # Decision logic
-        action = "MAINTAIN"
-        reason = "Load stable within normal range"
-        new_instances = current_instances
-        action_color = "green"
-        
-        if is_anomaly and anomaly_result.get('z_score', 0) > ANOMALY_THRESHOLD_SIGMA:
-            action = "WARNING"
-            reason = f"⚠️ ANOMALY DETECTED: {anomaly_result['reason']}. Auto-scaling paused to prevent cost explosion."
-            action_color = "red"
-        elif in_cooldown:
-            action = "COOLDOWN"
-            reason = f"⏳ Hysteresis period active. {cooldown_remaining:.1f} minutes remaining."
-            action_color = "orange"
+        # Main content area
+        if is_active:
+            # Check if we have enough data to make predictions
+            if len(self.data_buffer) >= self.config.train_window:
+                # Show control buttons
+                col1, col2, col3 = st.columns([2, 1, 1])
+                with col2:
+                    auto_update = st.checkbox("Auto-update", value=True, key="auto_update_preds")
+                with col3:
+                    if st.button("🔄 Refresh Now", key="refresh_predictions"):
+                        st.session_state['force_repredict'] = True
+                        st.rerun()
+                
+                # Auto-update predictions as data streams (every 20 new data points to allow model inference time)
+                should_update = (
+                    len(self.forecast_buffer) == 0 or 
+                    st.session_state.get('force_repredict', False) or
+                    (auto_update and len(self.data_buffer) % 20 == 0)
+                )
+                
+                # Try to make predictions
+                if should_update:
+                    with st.spinner("Calling ML API for predictions..."):
+                        # Send at least train_window + forecast_horizon data for rolling inference
+                        # If we have more, send up to train_window + 100 for better context
+                        required_len = self.config.train_window + settings.FORECAST_HORIZON
+                        max_len = self.config.train_window + 200
+                        data_len = min(len(self.data_buffer), max_len)
+                        data_len = max(data_len, required_len) if len(self.data_buffer) >= required_len else self.config.train_window
+                        data = self.data_buffer[-data_len:]
+                        result, error = self.call_forecast_api(data, settings.FORECAST_HORIZON)
+                        
+                        if error:
+                            st.error(f"❌ {error}")
+                        else:
+                            # Replace predictions (showing future forecast from current point)
+                            self.forecast_buffer = result
+                            
+                            st.session_state['force_repredict'] = False
+                            st.success(f"✅ Future forecast updated! ({len(result)} points ahead)")
+                            
+                            # Call additional APIs for anomaly, scaling, and cost
+                            if len(self.data_buffer) > 10:
+                                anomaly_result, _ = self.call_anomaly_api(self.data_buffer[-50:])
+                                if anomaly_result:
+                                    self.anomaly_info = anomaly_result
+                            
+                            if len(self.forecast_buffer) > 0:
+                                scaling_result, _ = self.call_scaling_api(self.forecast_buffer)
+                                if scaling_result:
+                                    self.scaling_info = scaling_result
+                                
+                                cost_result, _ = self.call_cost_api(self.forecast_buffer)
+                                if cost_result:
+                                    self.cost_info = cost_result
+            else:
+                progress = len(self.data_buffer) / self.config.train_window
+                st.info(f"📊 Accumulating data... {len(self.data_buffer)}/{self.config.train_window} ({progress*100:.1f}%)")
+                st.progress(progress)
+            
+            st.divider()
+            
+            # Create a placeholder for the plot to avoid duplicates
+            plot_placeholder = st.empty()
+            
+            # Show plot
+            if len(self.forecast_buffer) > 0:
+                fig = self.plot_forecast()
+                if fig:
+                    with plot_placeholder:
+                        st.plotly_chart(fig, width='stretch', key='forecast_with_predictions')
+            elif len(self.data_buffer) > 0:
+                # Show only actual data if no predictions yet
+                fig = self._plot_data_only()
+                if fig:
+                    with plot_placeholder:
+                        st.plotly_chart(fig, width='stretch', key='forecast_data_only')
+            
+            # Show insights section
+            if self.anomaly_info or self.scaling_info or self.cost_info:
+                st.divider()
+                st.subheader("📊 Insights & Recommendations")
+                
+                col1, col2, col3 = st.columns(3)
+                
+                with col1:
+                    st.markdown("#### 🔍 Anomaly Detection")
+                    if self.anomaly_info:
+                        if self.anomaly_info.get('is_anomaly'):
+                            st.error(self.anomaly_info.get('reason'))
+                            st.metric("Z-Score", f"{self.anomaly_info.get('z_score', 0):.2f}")
+                        else:
+                            st.success("✅ Normal traffic pattern")
+                            st.metric("Z-Score", f"{self.anomaly_info.get('z_score', 0):.2f}")
+                        st.caption(f"Current: {self.anomaly_info.get('current_load', 0):.0f} | Mean: {self.anomaly_info.get('mean_load', 0):.0f}")
+                    else:
+                        st.info("Waiting for data...")
+                
+                with col2:
+                    st.markdown("#### ⚙️ Scaling Recommendation")
+                    if self.scaling_info:
+                        action = self.scaling_info.get('action')
+                        if action == "SCALE_UP":
+                            st.warning(f"🔼 {action}")
+                        elif action == "SCALE_DOWN":
+                            st.info(f"🔽 {action}")
+                        else:
+                            st.success(f"✅ {action}")
+                        
+                        st.metric(
+                            "Recommended Instances", 
+                            self.scaling_info.get('recommended_instances'),
+                            delta=self.scaling_info.get('recommended_instances') - self.scaling_info.get('current_instances')
+                        )
+                        st.caption(self.scaling_info.get('reason'))
+                    else:
+                        st.info("Waiting for predictions...")
+                
+                with col3:
+                    st.markdown("#### 💰 Cost Estimation")
+                    if self.cost_info:
+                        st.metric("Hourly Cost", f"${self.cost_info.get('recommended_cost_per_hour', 0):.2f}")
+                        st.metric("Daily Cost", f"${self.cost_info.get('daily_cost_estimate', 0):.2f}")
+                        st.metric("Monthly Cost", f"${self.cost_info.get('monthly_cost_estimate', 0):.2f}")
+                        
+                        diff = self.cost_info.get('cost_difference', 0)
+                        if diff > 0:
+                            st.caption(f"⬆️ +${diff:.2f}/hr vs current")
+                        elif diff < 0:
+                            st.caption(f"⬇️ ${diff:.2f}/hr vs current")
+                    else:
+                        st.info("Waiting for predictions...")
+                        
         else:
-            if predicted_utilization > SCALE_UP_THRESHOLD:
-                action = "SCALE_OUT"
-                new_instances = required_instances
-                reason = f"📈 Predicted load ({avg_per_minute:.0f} req/min) exceeds {SCALE_UP_THRESHOLD*100:.0f}% capacity. Scale from {current_instances} to {new_instances} instances."
-                action_color = "blue"
-            elif predicted_utilization < SCALE_DOWN_THRESHOLD and current_instances > 1:
-                action = "SCALE_IN"
-                new_instances = max(1, required_instances)
-                reason = f"📉 Predicted load ({avg_per_minute:.0f} req/min) below {SCALE_DOWN_THRESHOLD*100:.0f}% capacity. Scale from {current_instances} to {new_instances} instances."
-                action_color = "blue"
-            else:
-                action = "MAINTAIN"
-                reason = f"✅ Current capacity ({current_instances} instances) sufficient. Utilization: {predicted_utilization*100:.1f}%"
-                action_color = "green"
-        
-        # Display recommendation
-        col1, col2, col3 = st.columns([1, 2, 1])
-        
-        with col1:
-            st.metric("Current Instances", current_instances)
-        
-        with col2:
-            # Color-coded action badge
-            if action_color == "red":
-                st.error(f"**Action: {action}**")
-            elif action_color == "orange":
-                st.warning(f"**Action: {action}**")
-            elif action_color == "blue":
-                st.info(f"**Action: {action}**")
-            else:
-                st.success(f"**Action: {action}**")
-        
-        with col3:
-            st.metric("Recommended Instances", new_instances, delta=new_instances - current_instances)
-        
-        st.write(reason)
-        
-        # Detailed metrics
-        with st.expander("📊 Detailed Scaling Metrics"):
-            col1, col2 = st.columns(2)
+            # Initial state - show instructions
+            st.info("👈 Start the **Forecast Simulator** from the sidebar to begin streaming data and making predictions")
             
-            with col1:
-                st.write("**Capacity Analysis**")
-                st.write(f"- Current capacity: {current_capacity} req/min")
-                st.write(f"- Current utilization: {current_utilization*100:.1f}%")
-                st.write(f"- Predicted utilization: {predicted_utilization*100:.1f}%")
-                st.write(f"- Required instances: {required_instances}")
-            
-            with col2:
-                st.write("**Cost Estimation**")
-                hourly_cost_current = current_instances * UNIT_COST_PER_INSTANCE
-                hourly_cost_new = new_instances * UNIT_COST_PER_INSTANCE
-                st.write(f"- Current hourly cost: ${hourly_cost_current:.3f}")
-                st.write(f"- Projected hourly cost: ${hourly_cost_new:.3f}")
-                st.write(f"- Daily cost (projected): ${hourly_cost_new * 24:.2f}")
-                st.write(f"- Monthly cost (projected): ${hourly_cost_new * 24 * 30:.2f}")
-        
-        # Action buttons (simulation)
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            if st.button("🔼 Scale Up (+1)", disabled=in_cooldown, width='stretch'):
-                st.session_state.current_instances += 1
-                st.session_state.last_scale_time = datetime.now()
-                st.success(f"Scaled up to {st.session_state.current_instances} instances")
-                st.rerun()
-        
-        with col2:
-            if st.button("✅ Apply Recommendation", disabled=(action in ["MAINTAIN", "COOLDOWN", "WARNING"]), width='stretch'):
-                st.session_state.current_instances = new_instances
-                st.session_state.last_scale_time = datetime.now()
-                st.success(f"Applied recommendation: {new_instances} instances")
-                st.rerun()
-        
-        with col3:
-            if st.button("🔽 Scale Down (-1)", disabled=(current_instances <= 1 or in_cooldown), width='stretch'):
-                st.session_state.current_instances = max(1, current_instances - 1)
-                st.session_state.last_scale_time = datetime.now()
-                st.success(f"Scaled down to {st.session_state.current_instances} instances")
-                st.rerun()
+            with st.expander("ℹ️ How it works"):
+                st.markdown("""
+                1. **Start Simulator**: Click 'Start' under 'Forecast Simulator' in the sidebar
+                2. **Data Accumulation**: The system will collect historical data for the prediction window
+                3. **ML Predictions**: Once enough data is collected, predictions are made via the ML API
+                4. **Real-time Updates**: The chart updates as new data streams in
+                
+                **Requirements**:
+                - ML Server must be running on port 8000
+                - Minimum {} data points needed for predictions
+                """.format(self.config.train_window))
     
-    def render(self, logs_buffer=None):
-        """Main render method for the dashboard"""
-        # Sync logs buffer if provided
-        if logs_buffer is not None:
-            self.logs_buffer = logs_buffer
+    def _plot_data_only(self):
+        """Plot only the actual data without predictions"""
+        if len(self.data_buffer) == 0:
+            return None
+            
+        known_df = pd.DataFrame(self.data_buffer)
+        known_df['timestamp'] = pd.to_datetime(known_df['timestamp'])
         
-        # Render forecast view
-        self.render_forecast_view(time_window_key="15min")
+        fig = go.Figure()
+        fig.add_trace(go.Scatter(
+            x=known_df['timestamp'],
+            y=known_df['target'],
+            mode='lines',
+            name='Actual Traffic',
+            line=dict(color='#2ECC71', width=2)
+        ))
+        
+        fig.update_layout(
+            title='Traffic Data - Actual',
+            xaxis_title='Timestamp',
+            yaxis_title='Traffic Volume',
+            hovermode='x unified',
+            template='plotly_dark',
+            height=500
+        )
+        
+        return fig

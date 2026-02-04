@@ -3,7 +3,7 @@ Settings and configuration for the Log Monitor Dashboard
 """
 
 # Simulation settings
-DEFAULT_SPEED_MULTIPLIER = 5.0
+DEFAULT_SPEED_MULTIPLIER = 10.0
 SPEED_OPTIONS = {
     "1x (Real-time)": 1.0,
     "5x (Fast)": 5.0,
@@ -15,8 +15,9 @@ SPEED_OPTIONS = {
 # Display settings
 MAX_LOGS_DISPLAY = 5000  
 MAX_LOGS_DASHBOARD = 50
-BATCH_SIZE = 30  
-REFRESH_INTERVAL = 2.3  
+BATCH_SIZE = 5  # Reduced for slower streaming
+REFRESH_INTERVAL = 3.5  # Increased delay for model inference
+FORECAST_HORIZON = 15
 
 # Time window settings for time-series analysis
 TIME_CHUNKS = {

@@ -1,6 +1,7 @@
 """
 ML Server Utilities - Model Loading and Inference
 """
+import joblib
 import pandas as pd
 import numpy as np
 import torch
@@ -8,7 +9,6 @@ from pathlib import Path
 
 from model.model import Seq2SeqModel, LSTMModel
 from model.params import get_params
-from model.input_pipe import ScalerWrapper
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -16,9 +16,8 @@ class Predictor:
     def __init__(self, model_type: str = "baseline"):
         self.model_type = model_type
         self.config = get_params(model_type)
-        self.scaler = ScalerWrapper(self.config.scaler_path, model_type)
+        self.scaler = joblib.load(self.config.scaler_path)
         self.model = self._load_model()
-        self._input_size = None  # For enhanced model
 
     def _load_model(self):
         if self.model_type == "baseline":
@@ -30,11 +29,19 @@ class Predictor:
                 dropout=self.config.dropout
             )
         elif self.model_type == "enhanced":
+            # Determine input size from cached data
+            sample_df = pd.read_csv('./cache/simulated_data.csv', nrows=1)
+            input_features = [col for col in sample_df.columns if col not in ['timestamp', 'target', 'target_scaled']]
+            input_size = len(input_features) + 1  # +1 for target_scaled
+            
             model = Seq2SeqModel(
-                input_size= self._input_size,
-                hidden_size=self.config.hidden_size,
-                num_layers=self.config.num_layers,
-                dropout=self.config.dropout
+                input_size=input_size,
+                encoder_hidden=self.config.hidden_size,
+                decoder_hidden=self.config.hidden_size,
+                encoder_layers=self.config.num_layers,
+                decoder_layers=self.config.num_layers,
+                encoder_dropout=self.config.dropout,
+                decoder_dropout=self.config.dropout
             )
         else:
             raise ValueError(f"Unknown model type: {self.model_type}")
